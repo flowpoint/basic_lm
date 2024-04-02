@@ -1,3 +1,6 @@
 [submodule "TinyLlama"]
-	path = TinyLlama
+	path = models/TinyLlama
 	url = https://github.com/flowpoint/TinyLlama.git
+[submodule "models/mamba"]
+	path = models/mamba
+	url = git@github.com:flowpoint/mamba.git

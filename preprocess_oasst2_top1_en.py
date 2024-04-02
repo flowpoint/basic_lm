@@ -115,7 +115,7 @@ oasst2_guanaco = DatasetDict(
          'validation': build_split(ds, 'validation')
         })
 
-oasst2_guanaco.save_to_disk('oasst2_top1_en')
+oasst2_guanaco.save_to_disk('data/oasst2_top1_en')
 print("if you use this without much change, consider attributing me (flowpoint)")
 
 '''
