@@ -9,11 +9,22 @@ import torch
 from transformers import AutoTokenizer
 from safetensors.torch import save_model, load_model
 from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MambaConfig
+import argparse
+from transformers import MambaForCausalLM
 
-def infer_loop(modelname)
-    tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+from utils import Checkpoint, save_checkpoint, load_checkpoint
+
+from pdb import set_trace as bp
+
+def infer_loop(modelname):
+    #tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
+    tokenizer = AutoTokenizer.from_pretrained("state-spaces/mamba-130m-hf")
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-    model = load_safe_mamba(str(Path(modelname) / "model.safetensors"))
+    #model = load_safe_mamba(Path(modelname))
+    model = MambaForCausalLM.from_pretrained('state-spaces/mamba-130m-hf')
+    ckpt = load_checkpoint(args.modelname)
+    model.load_state_dict(ckpt.data['model'])
+
 
     #device = 'cpu'
     device = 'cuda'
@@ -23,14 +34,15 @@ def infer_loop(modelname)
 
     model = model.to(device)
     def infer_sample(txt):
-        input_ids = tokenizer(txt, return_tensors='pt', truncation=True, padding=True).to(device)
+        input_ids = tokenizer(txt, return_tensors='pt', truncation=False, padding=True).to(device)
         outputs = model.generate(input_ids=input_ids['input_ids'],
                                  max_length=200,
-                                 cg=True,
+                                 #cg=True,
                                  #return_dict_in_geenerate=False,
-                                 temperature=0.
+                                 #temperature=0.
                                  )
-        return tokenizer.decode(outputs[0])
+        txt_out = tokenizer.decode(outputs[0])
+        return txt_out
 
     while 1:
         try:
@@ -50,32 +62,6 @@ if __name__ == '__main__':
     # path to the model
     parser.add_argument('modelname')
     args = parser.parse_args()
-    infer_loop(modelname)
-
-
-def convert(checkpoint, output_dir):
-    ''' convert pytorch checkpoint to safetensor 
-    takes checkpoint dir
-    then saves a safetensor checkpoint to output_dir
-    '''
-    output_dir.mkdir()
-    config_file = Path(checkpoint) / 'config.json'
-
-    with config_file.open('r') as f:
-        config_data = json.loads(f.read())
-
-    config = MambaConfig(**config_data)
-    model = MambaLMHeadModel(config)
-    ckpt = torch.load(checkpoint)
-    model_d = ckpt['model']
-    shutil.copy(str(config_file), str(output_dir/'config.json'))
-    save_model(model, str(Path(output_dir/'model.safetensors')))
-
-def load_safe_mamba(path, device=None, dtype=None, **kwargs):
-    templ = Path('model_templ/config.json')
-    with templ.open('r') as f:
-        config_data = json.loads(f.read())
-    config = MambaConfig(**config_data)
-    model = MambaLMHeadModel(config, device=device, dtype=dtype, **kwargs)
-    load_model(model, path)
-    return model
+    #convert(args.modelname, 'data/ckpts/converted')
+    infer_loop(args.modelname)
+    #infer_loop('data/ckpts/converted')
