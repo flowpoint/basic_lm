@@ -1,9 +1,18 @@
+import random
+import logging
+import sys
 from datetime import datetime
 from time import time
 import gc
 from pathlib import Path
+from dataclasses import dataclass
+from typing import Optional, Literal, Any
+from uuid import uuid4
+import json
 
+import lmdb
 from tqdm import tqdm
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -12,13 +21,9 @@ import transformers
 from transformers import MambaForCausalLM
 from aim import Run
 
-import lmdb
-import json
 
-from safetensors.torch import save_model, load_model
-from dataclasses import dataclass
-from typing import Optional, Literal, Any
-from uuid import uuid4
+import optuna
+
 
 class DiskCache:
     def __init__(self):
@@ -62,9 +67,9 @@ from mamba_ssm import Mamba
 
 from utils import Checkpoint, save_checkpoint
 
-run = Run()
+run = None#Run()
 
-stub = False
+stub = True
 
 # hparams
 lr = 1.5e-3
@@ -86,15 +91,24 @@ device = 'cuda'
 tokenizer = transformers.AutoTokenizer.from_pretrained("state-spaces/mamba-130m-hf")
 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
-#model = MambaLMHeadModel.from_pretrained(basemodel)
-model = MambaForCausalLM.from_pretrained(basemodel)
-if precision == 'fp16':
-    model = model.half()
+model = None
 
-model = model.to(device)
-gc.collect()
+def get_model():
+    #model = MambaLMHeadModel.from_pretrained(basemodel)
+    global model
+    del model
+    gc.collect()
+    model = MambaForCausalLM.from_pretrained(basemodel)
+    if precision == 'fp16':
+        model = model.half()
 
-optim = transformers.Adafactor(model.parameters(), lr=lr, relative_step=False)
+    model = model.to(device)
+    return model
+
+get_model()
+
+#optim = transformers.Adafactor(model.parameters(), lr=lr, relative_step=False)
+optim = torch.optim.AdamW(model.parameters(), lr=lr)#, relative_step=False)
 
 
 def loss_fn(labels, logits):
@@ -109,40 +123,59 @@ def loss_fn(labels, logits):
 
 #@torch.compile
 @torch.autocast(device_type='cuda', dtype=torch.float16)#, enabled=prec == 'amp')
-def stepfn(sample_i, batch, maxl):
+def stepfn(sample_i, batch, maxl, run=None):
     b = batch['text']
     #b = ['asdfjka'*10000]*bs
     #b = tokenizer(b, return_tensors='pt', padding='max_length', truncation=True, max_length=1024)
-    b = tokenizer(b, return_tensors='pt', padding=True, truncation=True, max_length=maxl)
+    b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
+    # truncate here instead
     input_ids = b['input_ids'][..., :maxl].to(device)
     outputs = model(input_ids)
     logits =  outputs.logits
     loss = loss_fn(input_ids, logits)
+
     loss.backward()
 
     if sample_i % grad_accum == 0:
         optim.step()
         optim.zero_grad()
-        print(batch['text'][0])
+        #print(print_text_example(batch['text'][0]))
 
-    run.track(loss.detach().to('cpu').numpy().mean(), name='loss')
-    return loss
+    iloss = loss.detach().to('cpu').numpy().mean()
+    if run is not None:
+        run.track(iloss, name='train_loss')
+    return iloss
+
+@torch.autocast(device_type='cuda', dtype=torch.float16)#, enabled=prec == 'amp')
+def valid_step(sample_i, batch, maxl, run=None):
+    with torch.no_grad():
+        b = batch['text']
+        b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
+        # truncate here instead
+        input_ids = b['input_ids'][..., :maxl].to(device)
+        outputs = model(input_ids)
+        logits =  outputs.logits
+        loss = loss_fn(input_ids, logits)
+        iloss = loss.detach().to('cpu').numpy().mean()
+        if run is not None:
+            run.track(iloss, name='eval_loss')
+        return iloss
 
 
 @disk_cached
 def sniff_batchsize(maxl):
+    print('autotuning batchsize')
     exp_fac = 4
     working_bs = 1
     while 1:
         test_bs = working_bs * exp_fac
-        fake_batch = {'text': ['sniff_text;."]h$'*4*1024] * test_bs }
+        fake_batch = {'text': ['sniff_text;."]h$'*32*maxl] * test_bs }
         try:
             # 2 grad/ accum batches for safety
-            for i in tqdm(range(grad_accum*2+1)):
+            for i in tqdm(range(grad_accum+1)):
                 stepfn(i, fake_batch, maxl)
             working_bs = test_bs
-        except Exception as e:
-            print(e)
+        except torch.cuda.OutOfMemoryError:
             print(f'error with test_bs: {test_bs} stopping batch-expansion')
             exp_fac = exp_fac // 2
 
@@ -157,12 +190,8 @@ def sniff_batchsize(maxl):
 def print_text_example(t):
     width = 70
     height = 4
-    lines = [x[:width] for x in mlt.split('\n')][height]
+    lines = [x[:width] for x in t.split('\n')][:height]
     return '\n'.join(lines)
-
-
-    print(
-
 
 # a handle/handler for the whole trainsate
 # possibly eventually consistent
@@ -171,7 +200,7 @@ class Trainstate:
     model: Any
     optimizer: Any
 
-def state_to_checkpoint(trainstate):
+def state_to_checkpoint(trainstate, header={}):
     # create a synchronized trainstate, i.e. checkpoint
     # stub for now, bc not distributed
     cpid = str(uuid4())
@@ -179,43 +208,123 @@ def state_to_checkpoint(trainstate):
             "timestamp": (datetime.now().isoformat()),
             'id': cpid,
             'model_config': ''}
+    for k,v in header.items():
+        metadata[k] = v
     print(f'saving checkpoint {cpid}')
     data = {"model": trainstate.model, 
             'optimizer': trainstate.optimizer}
     # checkpoint : tuple(metadata, data)
     return Checkpoint(metadata, data)
 
+def trainloaders(ds, count, batch_size):
+    for i in range(count):
+        yield i, torch.utils.data.DataLoader(
+                ds, 
+                batch_size=batch_size,
+                shuffle=True, 
+                pin_memory=True,
+                drop_last=True
+                )
 
-def train(batch_size):
+def validloaders(ds, count, batch_size):
+    for i in range(count):
+        yield i, torch.utils.data.DataLoader(
+                ds, 
+                batch_size=batch_size,
+                shuffle=True, 
+                pin_memory=True,
+                drop_last=True
+                )
+
+
+def train(trial, hparams):
+    print(f'starting training run, with hparams: {hparams}')
+    batch_size = hparams['batch_size']
     gc.collect()
     ds = datasets.load_from_disk('data/oasst2_top1_en')
     trainset = ds['train']
+    validset = ds['validation']
     if stub:
         # run for 4 steps
         trainset = trainset.select(range(grad_accum*4))
 
     trainstate = Trainstate(model, optim)
-    save_checkpoint(state_to_checkpoint(trainstate))
+    trainplan = trainloaders(trainset, num_epochs, batch_size)
+    valids_per_epoch = 2
+    validplan = iter(validloaders(validset, num_epochs * valids_per_epoch, batch_size))
+    epoch_size = len(trainset)
+    eval_period = len(trainset) // valids_per_epoch
 
-    for epoch in range(num_epochs):
-        dl = torch.utils.data.DataLoader(
-                trainset, 
-                batch_size=batch_size,
-                shuffle=True, 
-                pin_memory=True
-                )
+    eval_losses = []
+    for epoch, dl in trainplan:
         stt = time()
 
         # note, progress in batches, not steps
-        for batch_i, batch in enumerate(tqdm(dl)):
-            assert grad_accum % bs == 0, f'bs has to divide grad_accum but is {bs}, {grad_accum}'
-            stepfn(batch_i*bs, batch, context_size)
+        for t_batch_i, t_batch in enumerate(tqdm(dl)):
+            i_sample = epoch * epoch_size * grad_accum + t_batch_i*batch_size
+            l = stepfn(i_sample, t_batch, context_size, run=run)
             if stt > time() + 20 * 60:
-                save_checkpoint(state_to_checkpoint(trainstate))
+                save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
 
-    save_checkpoint(state_to_checkpoint(trainstate))
+            if t_batch_i % eval_period == 0:
+                valid_count, valid_loader = next(validplan)
+                eval_losses = []
+                for v_batch_i, v_batch in enumerate(tqdm(valid_loader)):
+                    i_sample = v_batch_i
+                    l = valid_step(i_sample, t_batch, context_size, run=run)
+                    eval_losses.append(l)
 
+                trial.report(np.mean(eval_losses), valid_count)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+    save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
+    return np.mean(eval_losses)
+
+def run_trial(trial):
+    seed=42
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.use_deterministic_algorithms(True)
+    # also maybe: env var: CUBLAS_WORKSPACE_CONFIG=:16:8
+    # torch.utils.deterministic.fill_uninitialized_memory = True
+
+    global grad_accum
+    global lr
+    global num_epochs
+    grad_accum = 2 ** trial.suggest_int('grad_accum', 4, 8)
+    lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
+    num_epochs = trial.suggest_int('num_epochs', 1, 5)
+
+    global run
+    run = Run()
+
+    batch_size = min(sniff_batchsize(context_size), grad_accum)
+
+    hparams = {'batch_size':batch_size, 'lr':lr, 'num_epochs':num_epochs, 'grad_accum':grad_accum}
+    assert grad_accum % batch_size == 0, f'bs has to divide grad_accum but is {batch_size}, {grad_accum}'
+    get_model()
+
+    return train(trial, hparams)
+
+def htune():
+    optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
+    study_name = 'study_1'
+    storage_name = "sqlite:///data/studies/{}.db".format(study_name)
+    #sampler = optuna.samplers.RandomSampler()
+    sampler = optuna.samplers.TPESampler(seed=42)
+
+    # max number of total training steps, estimated
+    # by dataset having 5000 samples, 3 top models, 5 epochs
+    max_resource = 3*5 * 2000 
+    pruner = optuna.pruners.HyperbandPruner(max_resource=max_resource)
+    study = optuna.create_study(study_name=study_name, 
+                                sampler=sampler,
+                                direction=optuna.study.StudyDirection.MINIMIZE,
+                                pruner=pruner,
+                                storage=storage_name)
+    study.optimize(run_trial, n_trials=20)
 
 if __name__ == '__main__':
-    bs = sniff_batchsize(context_size)
-    train(bs)
+    htune()
