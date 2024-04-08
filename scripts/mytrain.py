@@ -69,7 +69,7 @@ from utils import Checkpoint, save_checkpoint
 
 run = None#Run()
 
-stub = True
+stub = False
 
 # hparams
 lr = 1.5e-3
@@ -303,13 +303,20 @@ def run_trial(trial):
     batch_size = min(sniff_batchsize(context_size), grad_accum)
 
     hparams = {'batch_size':batch_size, 'lr':lr, 'num_epochs':num_epochs, 'grad_accum':grad_accum}
+    run["hparams"] = hparams
+    run['trial_id'] = trial.number
+    global study_name
+    run['study'] = study_name
     assert grad_accum % batch_size == 0, f'bs has to divide grad_accum but is {batch_size}, {grad_accum}'
     get_model()
 
     return train(trial, hparams)
 
+study_name = ''
+
 def htune():
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
+    global study_name
     study_name = 'study_1'
     storage_name = "sqlite:///data/studies/{}.db".format(study_name)
     #sampler = optuna.samplers.RandomSampler()
