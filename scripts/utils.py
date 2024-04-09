@@ -74,6 +74,7 @@ def save_checkpoint(checkpoint):
     ''' checkpoint is a dict of the data to save
     this function does the formatting and saving to disk
     ''' 
+    print(f'saving checkpoint {checkpoint}')
     ckpt_dir = Path('data/ckpts') / checkpoint.metadata['id']
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 

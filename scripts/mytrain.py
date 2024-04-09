@@ -69,6 +69,7 @@ from utils import Checkpoint, save_checkpoint
 
 run = None#Run()
 
+#stub = True
 stub = False
 
 # hparams
@@ -79,7 +80,7 @@ context_size = 768
 #basemodel = 'state-spaces/mamba-2.8b-slimpj'
 basemodel = 'state-spaces/mamba-130m-hf'
 #precision = 'half'
-precision = ['fp16', 'amp'][0]
+precision = ['fp16', 'amp'][1]
 num_epochs = 1
 
 # run settings
@@ -92,13 +93,18 @@ tokenizer = transformers.AutoTokenizer.from_pretrained("state-spaces/mamba-130m-
 tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
 model = None
+optim = None
 
 def get_model():
     #model = MambaLMHeadModel.from_pretrained(basemodel)
     global model
+    global optim
     del model
     gc.collect()
     model = MambaForCausalLM.from_pretrained(basemodel)
+    # consider sophia, adahessian, lion
+    # adafactor, sgd
+    optim = torch.optim.AdamW(model.parameters(), lr=lr)#, relative_step=False)
     if precision == 'fp16':
         model = model.half()
 
@@ -108,7 +114,6 @@ def get_model():
 get_model()
 
 #optim = transformers.Adafactor(model.parameters(), lr=lr, relative_step=False)
-optim = torch.optim.AdamW(model.parameters(), lr=lr)#, relative_step=False)
 
 
 def loss_fn(labels, logits):
@@ -122,26 +127,44 @@ def loss_fn(labels, logits):
 
 
 #@torch.compile
-@torch.autocast(device_type='cuda', dtype=torch.float16)#, enabled=prec == 'amp')
-def stepfn(sample_i, batch, maxl, run=None):
+def stepfn(sample_i, batch, maxl, run=None, schedule=None, scaler=None):
     b = batch['text']
+    # pad with spaces (to longest)
+    pad_char = ' '.encode('utf-8')
     #b = ['asdfjka'*10000]*bs
     #b = tokenizer(b, return_tensors='pt', padding='max_length', truncation=True, max_length=1024)
-    b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
-    # truncate here instead
-    input_ids = b['input_ids'][..., :maxl].to(device)
-    outputs = model(input_ids)
-    logits =  outputs.logits
-    loss = loss_fn(input_ids, logits)
+    #b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
+    byt = [x.encode('utf-8') for x in b]
+    bmax = max([len(x) for x in byt])
+    byt = [list(x.ljust(bmax, pad_char)) for x in byt]
 
-    loss.backward()
+    b = {'input_ids': torch.tensor(byt, dtype=torch.int64)}
+    #b = [torch.tensor(list(x.encode('utf-8'))), dtype=torch.int64) for 
+    with torch.autocast(device_type='cuda', dtype=torch.float16):#, enabled=prec == 'amp')
+        # truncate here 
+        input_ids = b['input_ids'][..., :maxl].to(device)
+        outputs = model(input_ids)
+        logits =  outputs.logits
+        loss = loss_fn(input_ids, logits)
+        iloss = loss.detach().to('cpu').numpy().mean()
+
+    if scaler is not None:
+        scaler.scale(loss).backward()
+    else:
+        loss.backward()
 
     if sample_i % grad_accum == 0:
-        optim.step()
+        if scaler is not None:
+            scaler.step(optim)
+            scaler.update()
+        else:
+            optim.step()
+
         optim.zero_grad()
+        if schedule is not None:
+            schedule.step()
         #print(print_text_example(batch['text'][0]))
 
-    iloss = loss.detach().to('cpu').numpy().mean()
     if run is not None:
         run.track(iloss, name='train_loss')
     return iloss
@@ -244,6 +267,11 @@ def train(trial, hparams):
     ds = datasets.load_from_disk('data/oasst2_top1_en')
     trainset = ds['train']
     validset = ds['validation']
+
+    scaler = torch.cuda.amp.GradScaler()
+    global optim
+    optim.zero_grad()
+
     if stub:
         # run for 4 steps
         trainset = trainset.select(range(grad_accum*4))
@@ -254,6 +282,7 @@ def train(trial, hparams):
     validplan = iter(validloaders(validset, num_epochs * valids_per_epoch, batch_size))
     epoch_size = len(trainset)
     eval_period = len(trainset) // valids_per_epoch
+    schedule = transformers.get_linear_schedule_with_warmup(optim, 32, num_epochs * epoch_size // grad_accum)
 
     eval_losses = []
     for epoch, dl in trainplan:
@@ -262,7 +291,7 @@ def train(trial, hparams):
         # note, progress in batches, not steps
         for t_batch_i, t_batch in enumerate(tqdm(dl)):
             i_sample = epoch * epoch_size * grad_accum + t_batch_i*batch_size
-            l = stepfn(i_sample, t_batch, context_size, run=run)
+            l = stepfn(i_sample, t_batch, context_size, run=run, schedule=schedule, scaler=scaler)
             if stt > time() + 20 * 60:
                 save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
 
@@ -295,7 +324,7 @@ def run_trial(trial):
     global num_epochs
     grad_accum = 2 ** trial.suggest_int('grad_accum', 4, 8)
     lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
-    num_epochs = trial.suggest_int('num_epochs', 1, 5)
+    num_epochs = trial.suggest_int('num_epochs', 1, 8)
 
     global run
     run = Run()
@@ -317,21 +346,21 @@ study_name = ''
 def htune():
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     global study_name
-    study_name = 'study_1'
+    study_name = 'study_3_byt'
     storage_name = "sqlite:///data/studies/{}.db".format(study_name)
     #sampler = optuna.samplers.RandomSampler()
     sampler = optuna.samplers.TPESampler(seed=42)
 
-    # max number of total training steps, estimated
-    # by dataset having 5000 samples, 3 top models, 5 epochs
-    max_resource = 3*5 * 2000 
+    # num_epochs (max) times validations
+    n_trials = 10
+    max_resource = 8 * 2 * n_trials
     pruner = optuna.pruners.HyperbandPruner(max_resource=max_resource)
     study = optuna.create_study(study_name=study_name, 
                                 sampler=sampler,
                                 direction=optuna.study.StudyDirection.MINIMIZE,
                                 pruner=pruner,
                                 storage=storage_name)
-    study.optimize(run_trial, n_trials=20)
+    study.optimize(run_trial, n_trials=n_trials)
 
 if __name__ == '__main__':
     htune()

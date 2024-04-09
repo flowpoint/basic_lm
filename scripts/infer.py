@@ -28,20 +28,27 @@ def infer_loop(modelname):
 
     #device = 'cpu'
     device = 'cuda'
+    '''
     prec = 'half'
     if prec == 'half':
         model = model.half()
+    '''
 
     model = model.to(device)
     def infer_sample(txt):
-        input_ids = tokenizer(txt, return_tensors='pt', truncation=False, padding=True).to(device)
+        #input_ids = tokenizer(txt, return_tensors='pt', truncation=False, padding=True).to(device)
+        input_ids = {'input_ids': torch.tensor([list(txt.encode('utf-8'))], dtype=torch.int64, device=device)}
         outputs = model.generate(input_ids=input_ids['input_ids'],
                                  max_length=200,
                                  #cg=True,
                                  #return_dict_in_geenerate=False,
                                  #temperature=0.
                                  )
-        txt_out = tokenizer.decode(outputs[0])
+        #txt_out = tokenizer.decode(outputs[0])
+        # 0x7b = 127  is the maximum utf-8 ascii
+        outs = outputs[0].to('cpu').numpy().clip(0,127)
+        print(outs)
+        txt_out = bytes(list(outs)).decode('utf-8')
         return txt_out
 
     while 1:
