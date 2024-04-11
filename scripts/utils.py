@@ -15,7 +15,7 @@ import transformers
 from transformers import MambaForCausalLM
 from aim import Run
 
-from mamba_ssm import Mamba
+#from mamba_ssm import Mamba
 #from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 import json
 

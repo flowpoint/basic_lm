@@ -8,7 +8,7 @@ from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer
 from safetensors.torch import save_model, load_model
-from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MambaConfig
+#from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MambaConfig
 import argparse
 from transformers import MambaForCausalLM
 
@@ -26,8 +26,8 @@ def infer_loop(modelname):
     model.load_state_dict(ckpt.data['model'])
 
 
-    #device = 'cpu'
-    device = 'cuda'
+    device = 'cpu'
+    #device = 'cuda'
     '''
     prec = 'half'
     if prec == 'half':
@@ -54,7 +54,8 @@ def infer_loop(modelname):
     while 1:
         try:
             inp = input("prompt: ")
-            fmt = f"prompter: {inp}\nassistant: "
+            #fmt = f"prompter: {inp}\nassistant: "
+            fmt = inp
             print(infer_sample(fmt))
         except KeyboardInterrupt:
             break

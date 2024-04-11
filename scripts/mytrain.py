@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional, Literal, Any
 from uuid import uuid4
 import json
+import os
 
 import lmdb
 from tqdm import tqdm
@@ -21,6 +22,8 @@ import transformers
 from transformers import MambaForCausalLM
 from aim import Run
 
+os.environ['CUBLAS_WORKSPACE_CONFIG']=':4096:8'
+datasets.config.HF_DATASETS_OFFLINE = True
 
 import optuna
 
@@ -173,7 +176,14 @@ def stepfn(sample_i, batch, maxl, run=None, schedule=None, scaler=None):
 def valid_step(sample_i, batch, maxl, run=None):
     with torch.no_grad():
         b = batch['text']
-        b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
+        #b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
+
+        byt = [x.encode('utf-8') for x in b]
+        bmax = max([len(x) for x in byt])
+        pad_char = ' '.encode('utf-8')
+        byt = [list(x.ljust(bmax, pad_char)) for x in byt]
+
+        b = {'input_ids': torch.tensor(byt, dtype=torch.int64)}
         # truncate here instead
         input_ids = b['input_ids'][..., :maxl].to(device)
         outputs = model(input_ids)
@@ -264,7 +274,16 @@ def train(trial, hparams):
     print(f'starting training run, with hparams: {hparams}')
     batch_size = hparams['batch_size']
     gc.collect()
-    ds = datasets.load_from_disk('data/oasst2_top1_en')
+    #ds = datasets.load_from_disk('data/oasst2_top1_en')
+    ds_path = '/root/lfs/SlimPajama-627B/'
+    ds = datasets.load_dataset(ds_path,
+           #data_files={"valid":'validation/chunk1/example_holdout_0.jsonl.zst'}
+           data_files={
+               "train":'train/chunk1/example_train_?.jsonl.zst',
+               "validation":'validation/chunk1/example_holdout_?.jsonl.zst',
+               }
+        )
+
     trainset = ds['train']
     validset = ds['validation']
 
@@ -346,7 +365,7 @@ study_name = ''
 def htune():
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     global study_name
-    study_name = 'study_3_byt'
+    study_name = 'study_4_byt'
     storage_name = "sqlite:///data/studies/{}.db".format(study_name)
     #sampler = optuna.samplers.RandomSampler()
     sampler = optuna.samplers.TPESampler(seed=42)
