@@ -279,8 +279,8 @@ def train(trial, hparams):
     ds = datasets.load_dataset(ds_path,
            #data_files={"valid":'validation/chunk1/example_holdout_0.jsonl.zst'}
            data_files={
-               "train":'train/chunk1/example_train_?.jsonl.zst',
-               "validation":'validation/chunk1/example_holdout_?.jsonl.zst',
+               "train":'train/chunk1/example_train_??.jsonl.zst',
+               "validation":'validation/chunk1/example_holdout_??.jsonl.zst',
                }
         )
 
@@ -311,8 +311,9 @@ def train(trial, hparams):
         for t_batch_i, t_batch in enumerate(tqdm(dl)):
             i_sample = epoch * epoch_size * grad_accum + t_batch_i*batch_size
             l = stepfn(i_sample, t_batch, context_size, run=run, schedule=schedule, scaler=scaler)
-            if stt > time() + 20 * 60:
+            if time() > stt + 20 * 60:
                 save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
+                stt = time()
 
             if t_batch_i % eval_period == 0:
                 valid_count, valid_loader = next(validplan)
@@ -343,7 +344,7 @@ def run_trial(trial):
     global num_epochs
     grad_accum = 2 ** trial.suggest_int('grad_accum', 4, 8)
     lr = trial.suggest_float('lr', 1e-5, 1e-2, log=True)
-    num_epochs = trial.suggest_int('num_epochs', 1, 8)
+    num_epochs = trial.suggest_int('num_epochs', 1, 10)
 
     global run
     run = Run()
@@ -362,6 +363,7 @@ def run_trial(trial):
 
 study_name = ''
 
+
 def htune():
     optuna.logging.get_logger("optuna").addHandler(logging.StreamHandler(sys.stdout))
     global study_name
@@ -378,8 +380,12 @@ def htune():
                                 sampler=sampler,
                                 direction=optuna.study.StudyDirection.MINIMIZE,
                                 pruner=pruner,
-                                storage=storage_name)
-    study.optimize(run_trial, n_trials=n_trials)
+                                storage=storage_name,
+                                load_if_exists=True
+                                )
+    #study.optimize(run_trial, n_trials=n_trials)
+    run_trial(study.best_trial)
+
 
 if __name__ == '__main__':
     htune()
