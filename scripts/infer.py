@@ -173,6 +173,7 @@ class MyTok:
     
         byt = [x.encode('utf-8') for x in b]
         bmax = max([len(x) for x in byt])
+        bmax = min(max([len(x) for x in byt]), 768)
         byt = [list(x.ljust(bmax, self.pad_char)) for x in byt]
         #b = {'input_ids': torch.tensor(byt, dtype=torch.int64)}
         return byt#b['input_ids']
