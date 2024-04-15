@@ -275,7 +275,8 @@ def train(trial, hparams):
     batch_size = hparams['batch_size']
     gc.collect()
     #ds = datasets.load_from_disk('data/oasst2_top1_en')
-    ds_path = '/root/lfs/SlimPajama-627B/'
+    #ds_path = '/root/lfs/SlimPajama-627B/'
+    ds_path = '/home/flowpoint/lfs/SlimPajama-627B/'
     ds = datasets.load_dataset(ds_path,
            #data_files={"valid":'validation/chunk1/example_holdout_0.jsonl.zst'}
            data_files={
@@ -383,8 +384,8 @@ def htune():
                                 storage=storage_name,
                                 load_if_exists=True
                                 )
-    #study.optimize(run_trial, n_trials=n_trials)
-    run_trial(study.best_trial)
+    study.optimize(run_trial, n_trials=n_trials)
+    #run_trial(study.best_trial)
 
 
 if __name__ == '__main__':
