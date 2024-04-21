@@ -153,6 +153,8 @@ collator = transformers.DataCollatorWithPadding(
         )
 '''
 ##
+savepath = '/root/data/data/slimpajama/train'
+
 for chunk, chunk_files in dtree.items():
     ds = datasets.load_dataset(path,
                                data_files={

@@ -9,7 +9,7 @@ import zlib
 # pip install pycairo
 # pip install pygobject
 #dnf install cairo-devel python3-gobject-devel python3-cairo-devel gtk4 cairo-gobject-devel gtk4
-matplotlib.use('GTK4Agg')
+#matplotlib.use('GTK4Agg')
 ##
 
 path = '/home/flowpoint/lfs/SlimPajama-627B'
@@ -29,6 +29,24 @@ stats = []
 space_counts = []
 lens = []
 cratios = []
+
+def get_cratio(s):
+    txt = s['text']
+    etxt = txt.encode('utf-8')
+    cetxt = zlib.compress(etxt)
+    cratio = len(etxt) / len(cetxt)
+    return cratio
+
+def filter_criterion(s):
+    if get_cratio(s) > 3:
+        return False
+    if get_cratio(s) <= 1.3:
+        return False
+    if len(s['text']) > 30000:
+        return False
+    if len(s['text']) < 128:
+        return False
+    return True
 
 for s in tqdm(trainset):
     txt = s['text']

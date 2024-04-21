@@ -8,7 +8,7 @@ from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer
 from safetensors.torch import save_model, load_model
-#from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MambaConfig
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel, MambaConfig
 import argparse
 from transformers import MambaForCausalLM
 
@@ -16,17 +16,28 @@ from utils import Checkpoint, save_checkpoint, load_checkpoint
 
 from pdb import set_trace as bp
 
-device = 'cpu'
-#device = 'cuda'
+#device = 'cpu'
+device = 'cuda'
+#model_type = 'hf_130m'
+model_type = 'mybyte'
 
 def infer_loop(modelname):
     #tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
-    tokenizer = AutoTokenizer.from_pretrained("state-spaces/mamba-130m-hf")
-    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     #model = load_safe_mamba(Path(modelname))
-    model = MambaForCausalLM.from_pretrained('state-spaces/mamba-130m-hf')
-    ckpt = load_checkpoint(args.modelname)
-    model.load_state_dict(ckpt.data['model'])
+    if model_type == 'mybyte':
+        model_config = MambaConfig(
+                d_model=768,
+                n_layer=24,
+                vocab_size=255,
+                )
+        model = MambaLMHeadModel(model_config)
+
+        ckpt = load_checkpoint(args.modelname)
+        model.load_state_dict(ckpt.data['model'])
+    elif model_type == 'hf_130m':
+        tokenizer = AutoTokenizer.from_pretrained("state-spaces/mamba-130m-hf")
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        model = MambaForCausalLM.from_pretrained('state-spaces/mamba-130m-hf')
 
 
     '''
@@ -40,22 +51,27 @@ def infer_loop(modelname):
         out = model(tok)
         out
     def infer_sample(txt):
-        #input_ids = tokenizer(txt, return_tensors='pt', truncation=False, padding=True).to(device)
-        input_ids = {'input_ids': torch.tensor([list(txt.encode('utf-8'))], dtype=torch.int64, device=device)}
+        if model_type == 'hf_130m':
+            input_ids = tokenizer(txt, return_tensors='pt', truncation=False, padding=True).to(device)
+        else:
+            input_ids = {'input_ids': torch.tensor([list(txt.encode('utf-8'))], dtype=torch.int64, device=device)}
+
         outputs = model.generate(input_ids=input_ids['input_ids'],
                                  max_length=200,
-                                 do_sample=False,
+                                 #do_sample=False,
                                  #repetition_penalty=1.,
                                  #no_repeat_ngram_size=3,
                                  #cg=True,
                                  #return_dict_in_geenerate=False,
                                  #temperature=0.2
                                  )
-        #txt_out = tokenizer.decode(outputs[0])
         # 0x7b = 127  is the maximum utf-8 ascii
-        outs = outputs[0].to('cpu').numpy().clip(0,127)
-        print(outs)
-        txt_out = bytes(list(outs)).decode('utf-8')
+        if model_type == 'hf_130m':
+            txt_out = tokenizer.decode(outputs[0])
+        else:
+            outs = outputs[0].to('cpu').numpy().clip(0,127)
+            print(outs)
+            txt_out = bytes(list(outs)).decode('utf-8')
         return txt_out
 
     while 1:
@@ -68,7 +84,6 @@ def infer_loop(modelname):
             break
 
 
-'''
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
                         prog='ProgramName',
@@ -79,9 +94,8 @@ if __name__ == '__main__':
     parser.add_argument('modelname')
     args = parser.parse_args()
     #convert(args.modelname, 'data/ckpts/converted')
-    #infer_loop(args.modelname)
+    infer_loop(args.modelname)
     #infer_loop('data/ckpts/converted')
-'''
 
 
 
@@ -215,7 +229,7 @@ class MyMambaEvalWrapper(HFLM):
 
     AUTO_MODEL_CLASS = transformers.AutoModelForCausalLM
 
-    def __init__(self, pretrained="state-spaces/mamba-2.8b", max_length=2048, batch_size=None, device="cuda",
+    def __init__(self, pretrained="state-spaces/mamba-2.8b", max_length=2048, batch_size=None, device=device,
                  dtype=torch.float16):
         LM.__init__(self)
         #self._model = MambaLMHeadModel.from_pretrained(pretrained, device=device, dtype=dtype)
@@ -261,5 +275,7 @@ class MyMambaEvalWrapper(HFLM):
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         raise NotImplementedError()
 
+'''
 if __name__ == '__main__':
     cli_evaluate()
+'''

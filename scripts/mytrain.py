@@ -66,7 +66,8 @@ def disk_cached(func):
 
 
 from mamba_ssm import Mamba
-#from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+from mamba_ssm.models.config_mamba import MambaConfig
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 
 from utils import Checkpoint, save_checkpoint
 
@@ -97,6 +98,10 @@ tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
 model = None
 optim = None
+##
+def count_params(model):
+    return sum(p.numel() for p in model.parameters())
+##
 
 def get_model():
     #model = MambaLMHeadModel.from_pretrained(basemodel)
@@ -104,7 +109,13 @@ def get_model():
     global optim
     del model
     gc.collect()
-    model = MambaForCausalLM.from_pretrained(basemodel)
+    model_config = MambaConfig(
+            d_model=768,
+            n_layer=24,
+            vocab_size=255,
+            )
+    model = MambaLMHeadModel(model_config)
+
     # consider sophia, adahessian, lion
     # adafactor, sgd
     optim = torch.optim.AdamW(model.parameters(), lr=lr)#, relative_step=False)
@@ -269,6 +280,34 @@ def validloaders(ds, count, batch_size):
                 drop_last=True
                 )
 
+def profile():
+    from torch.profiler import profile, record_function, ProfilerActivity
+
+    batch_size = 16
+    maxl = context_size
+    hparams = {'batch_size':batch_size, 'lr':1e-5, 'num_epochs':1, 'grad_accum':64}
+    fake_batch = {'text': ['sniff_text;."]h$'*32*maxl] * batch_size }
+
+    scaler = torch.cuda.amp.GradScaler()
+    global optim
+    optim.zero_grad()
+
+    # warmup
+    for i in tqdm(range(grad_accum+1)):
+        stepfn(i, fake_batch, maxl)
+
+    with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], 
+            record_shapes=True,
+            profile_memory=True
+            ) as prof:
+        with record_function('accum_batch'):
+            for i in tqdm(range(grad_accum+1)):
+                stepfn(i, fake_batch, maxl)
+
+    prof.export_chrome_trace('trace.json')
+    return prof
+
 
 def train(trial, hparams):
     print(f'starting training run, with hparams: {hparams}')
@@ -284,6 +323,8 @@ def train(trial, hparams):
                "validation":'validation/chunk1/example_holdout_??.jsonl.zst',
                }
         )
+    from analyse_ds import filter_criterion
+    ds = ds.filter(filter_criterion)
 
     trainset = ds['train']
     validset = ds['validation']
@@ -302,7 +343,8 @@ def train(trial, hparams):
     validplan = iter(validloaders(validset, num_epochs * valids_per_epoch, batch_size))
     epoch_size = len(trainset)
     eval_period = len(trainset) // valids_per_epoch
-    schedule = transformers.get_linear_schedule_with_warmup(optim, 32, num_epochs * epoch_size // grad_accum)
+    #schedule = transformers.get_linear_schedule_with_warmup(optim, 32, num_epochs * epoch_size // grad_accum)
+    schedule = transformers.get_constant_schedule_with_warmup(optim, 32)
 
     eval_losses = []
     for epoch, dl in trainplan:
@@ -384,9 +426,12 @@ def htune():
                                 storage=storage_name,
                                 load_if_exists=True
                                 )
-    study.optimize(run_trial, n_trials=n_trials)
-    #run_trial(study.best_trial)
+    #study.optimize(run_trial, n_trials=n_trials)
+    run_trial(study.best_trial)
 
 
 if __name__ == '__main__':
-    htune()
+    if bool(os.environ['DEV']) == True:
+        pass
+    else:
+        htune()
