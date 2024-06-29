@@ -109,9 +109,16 @@ def get_model():
     global optim
     del model
     gc.collect()
+    '''
     model_config = MambaConfig(
             d_model=768,
             n_layer=24,
+            vocab_size=255,
+            )
+    '''
+    model_config = MambaConfig(
+            d_model=768,
+            n_layer=12,
             vocab_size=255,
             )
     model = MambaLMHeadModel(model_config)
@@ -139,27 +146,44 @@ def loss_fn(labels, logits):
     #loss_per_sample = loss.view(shift_logits.size(0), shift_logits.size(1)).mean(axis=1)
     return loss
 
+def seq2seq_loss_fn(labels, logits, maxl):
+    shift_labels = labels[..., :].contiguous()
+    shift_logits = logits[..., :, :].contiguous()
+    loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1), reduction='none')[(maxl//2):].mean()
+    # Resize and average loss per sample
+    #loss_per_sample = loss.view(shift_logits.size(0), shift_logits.size(1)).mean(axis=1)
+    return loss
 
 #@torch.compile
 def stepfn(sample_i, batch, maxl, run=None, schedule=None, scaler=None):
+    input_maxl = maxl//2
+    output_maxl = maxl - input_maxl
     b = batch['text']
+    #b = [x[:input_maxl] for x in b]
     # pad with spaces (to longest)
     pad_char = ' '.encode('utf-8')
     #b = ['asdfjka'*10000]*bs
     #b = tokenizer(b, return_tensors='pt', padding='max_length', truncation=True, max_length=1024)
     #b = tokenizer(b, return_tensors='pt', padding='longest', truncation='do_not_truncate', max_length=maxl)
-    byt = [x.encode('utf-8') for x in b]
-    bmax = max([len(x) for x in byt])
-    byt = [list(x.ljust(bmax, pad_char)) for x in byt]
+    byt_txt = [x.encode('utf-8')[:maxl//2] for x in b]
+    #byt_txt = [(x+'<|end|>').encode('utf-8')[:maxl//2] for x in b]
+    #byt_targ_txt = [('<|start|>'+x).encode('utf-8')[:maxl//2] for x in b]
+    #print(f'byt_text: {byt_txt}')
+    #bmax = min(context_size, max([len(x) for x in byt_txt]))
+    bmax = context_size
+    byt = [list(x.ljust(bmax, pad_char))[:maxl] for x in byt_txt]
+    byt_targ = [list(x.rjust(bmax, pad_char))[-maxl:] for x in byt_txt]
+    #print(f'byt: {byt}')
+    #print(f'byt_targ: {byt_targ}')
 
-    b = {'input_ids': torch.tensor(byt, dtype=torch.int64)}
     #b = [torch.tensor(list(x.encode('utf-8'))), dtype=torch.int64) for 
     with torch.autocast(device_type='cuda', dtype=torch.float16):#, enabled=prec == 'amp')
-        # truncate here 
-        input_ids = b['input_ids'][..., :maxl].to(device)
+        input_ids = torch.tensor(byt, dtype=torch.int64, device=device)
+        target_ids = torch.tensor(byt_targ, dtype=torch.int64, device=device)
         outputs = model(input_ids)
         logits =  outputs.logits
-        loss = loss_fn(input_ids, logits)
+        #loss = loss_fn(targets, logits)
+        loss = seq2seq_loss_fn(target_ids, logits, maxl)
         iloss = loss.detach().to('cpu').numpy().mean()
 
     if scaler is not None:
@@ -324,7 +348,7 @@ def train(trial, hparams):
                }
         )
     from analyse_ds import filter_criterion
-    ds = ds.filter(filter_criterion)
+    ds = ds.filter(filter_criterion, num_proc=24, keep_in_memory=True)
 
     trainset = ds['train']
     validset = ds['validation']
@@ -354,7 +378,7 @@ def train(trial, hparams):
         for t_batch_i, t_batch in enumerate(tqdm(dl)):
             i_sample = epoch * epoch_size * grad_accum + t_batch_i*batch_size
             l = stepfn(i_sample, t_batch, context_size, run=run, schedule=schedule, scaler=scaler)
-            if time() > stt + 20 * 60:
+            if time() > stt + 60 * 60:
                 save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
                 stt = time()
 
@@ -369,6 +393,8 @@ def train(trial, hparams):
                 trial.report(np.mean(eval_losses), valid_count)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
+
+        save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
 
     save_checkpoint(state_to_checkpoint(trainstate, {"hparams":hparams}))
     return np.mean(eval_losses)

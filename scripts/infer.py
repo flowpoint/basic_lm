@@ -27,7 +27,7 @@ def infer_loop(modelname):
     if model_type == 'mybyte':
         model_config = MambaConfig(
                 d_model=768,
-                n_layer=24,
+                n_layer=12,
                 vocab_size=255,
                 )
         model = MambaLMHeadModel(model_config)
@@ -57,7 +57,7 @@ def infer_loop(modelname):
             input_ids = {'input_ids': torch.tensor([list(txt.encode('utf-8'))], dtype=torch.int64, device=device)}
 
         outputs = model.generate(input_ids=input_ids['input_ids'],
-                                 max_length=200,
+                                 max_length=1200,
                                  #do_sample=False,
                                  #repetition_penalty=1.,
                                  #no_repeat_ngram_size=3,
@@ -69,9 +69,10 @@ def infer_loop(modelname):
         if model_type == 'hf_130m':
             txt_out = tokenizer.decode(outputs[0])
         else:
-            outs = outputs[0].to('cpu').numpy().clip(0,127)
+            #outs = outputs[0].to('cpu').numpy().clip(0,127)
+            outs = outputs[0].to('cpu').numpy()
             print(outs)
-            txt_out = bytes(list(outs)).decode('utf-8')
+            txt_out = bytes(list(outs)).decode('utf-8', 'replace')
         return txt_out
 
     while 1:
